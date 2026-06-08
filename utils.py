@@ -29,6 +29,7 @@ def get_parsed_args():
     parser.add_argument("-num_plane_waves", default=360)
     parser.add_argument("-kt", default=1)
     parser.add_argument("-save", default=False)
+    parser.add_argument("-plot", default=False)
 
     #Mathieu parameters
     parser.add_argument("-q", default=1)
@@ -76,15 +77,35 @@ def create_cartesian_meshgrid(window_size, resolution):
     return xx.astype("float64"), yy.astype("float64")
 
 def save_experiment(args, alpha, beta, pred_beam, true_beam, execution_time):
-    save_name = args["beam"] + "_" + str(args["n_order"]) + "_" + str(args["resolution"]) + "_" + str(args["window_size"]) + "_" + str(args["problem_size"]) 
-    save_path = os.environ["NBLAB_PATH"] + f"oldideas/Results/{save_name}"
+    save_name = args["beam"] + "_" + str(args["resolution"]) + "_" + str(args["window_size"]) + "_" + str(args["problem_size"]) + "_" + str(args["loss_sigma"]) 
+    
+    # Es buena práctica usar os.path.join también aquí para evitar problemas con las barras "/"
+    save_path = os.path.join(os.environ["NBLAB_PATH"], "Results", save_name)
+    
+    # Create save_path and assume it doesn't exist
+    os.makedirs(save_path, exist_ok=True)
+    
     weights = pd.DataFrame()
     weights["alpha"] = alpha
     weights["beta"] = beta
     weights["execution_time"] = execution_time
     weights["error"] = compute_error(pred_beam, true_beam)
-    weights.to_csv(save_path + ".csv")
-    scipy.io.savemat(save_path + ".mat", {"pred_beam": pred_beam, "true_beam": true_beam})
+    
+    # CORRECCIÓN: Guardar el CSV DENTRO de save_path con el nombre "weights.csv"
+    csv_file = os.path.join(save_path, "weights.csv")
+    weights.to_csv(csv_file, index=False)
+    
+    args_to_save = {key: value for key, value in args.items() if key not in ["save"]}
+
+    # CORRECCIÓN: Guardar el TXT DENTRO de save_path con el nombre "args.txt"
+    txt_file = os.path.join(save_path, "args.txt")
+    with open(txt_file, "w") as f:
+        for key, value in args_to_save.items():
+            f.write(f"{key}: {value}\n")
+
+    # CORRECCIÓN: Guardar el MAT DENTRO de save_path con el nombre "data.mat" (o el que prefieras)
+    mat_file = os.path.join(save_path, "data.mat")
+    scipy.io.savemat(mat_file, {"pred_beam": pred_beam, "true_beam": true_beam})
 
 def compute_error(pred_beam, true_beam):
     return np.sum(np.abs(pred_beam - true_beam))

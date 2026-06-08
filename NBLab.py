@@ -124,7 +124,8 @@ class NBLab:
     
 
     def plot_beam(self, beam):
-        beam = beam[:,:,0] 
+        beam = beam[0] 
+        # beam = beam[:,:,0] 
         intensity = np.sqrt(np.abs(beam))
         plt.imshow(intensity)
         plt.show()
