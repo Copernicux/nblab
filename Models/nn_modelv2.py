@@ -59,7 +59,23 @@ class CustomFit(keras.Model):
         # 7. Retornar diccionario de métricas
         return {m.name: m.result() for m in self.metrics}
 
+class DynamicPhaseRotationLayer(tf.keras.layers.Layer):
+    def __init__(self, **kwargs):
+        super(DynamicPhaseRotationLayer, self).__init__(**kwargs)
 
+    def call(self, coeficientes, shift_dinamico):
+        # Asumimos que coeficientes tiene forma (batch_size, 2 * problem_size)
+        num_phases = coeficientes.shape[1] // 2
+        
+        alphas = coeficientes[:, :num_phases]
+        betas = coeficientes[:, num_phases:]
+        
+        # Sumamos el shift_dinamico (batch_size, 1) a las betas mediante broadcasting.
+        # Solo rota las imágenes que lo necesitan, con la magnitud que lo necesitan.
+        betas_corregidas = betas + shift_dinamico
+        
+        return tf.keras.backend.concatenate([alphas, betas_corregidas], axis=1)
+    
 class NLBModel(keras.Model):
     def __init__(self, args):
         super(NLBModel, self).__init__()
@@ -67,6 +83,11 @@ class NLBModel(keras.Model):
         self.resolution = self.args["resolution"]
         self.problem_size = self.args["problem_size"]
 
+        # self.rotation_predictor = tf.keras.Sequential([
+        #     tf.keras.layers.Flatten(),
+        #     tf.keras.layers.Dense(64, activation='relu'),
+        #     tf.keras.layers.Dense(1, activation='linear') # Predice 1 solo valor: el ángulo de desfase
+        # ])
         # Define the attention network
         self.attention = tf.keras.Sequential([
             tf.keras.layers.Conv2D(16, kernel_size=3, strides=1, padding='same', activation='relu'),
@@ -85,16 +106,35 @@ class NLBModel(keras.Model):
         )
         self.fft = FFTLayer()
 
-
         self.mlp = tf.keras.Sequential([
             tf.keras.layers.Flatten(), 
-            tf.keras.layers.Dense(4000, activation='tanh'),
-            tf.keras.layers.Dense(2000, activation='tanh'),
-            tf.keras.layers.Dense(1000, activation='tanh'),
-            tf.keras.layers.Dense(500, activation='tanh'),
-            tf.keras.layers.Dense(300, activation='tanh'),
+            # --- CAMBIO DE ARQUITECTURA ---
+            # Reducimos neuronas y agregamos Dropout para evitar sobreajuste local
+            tf.keras.layers.Dense(1024, activation='relu'),
+            tf.keras.layers.Dropout(0.3),
+            tf.keras.layers.Dense(512, activation='relu'),
+            tf.keras.layers.Dropout(0.3),
+            tf.keras.layers.Dense(256, activation='relu'),
             tf.keras.layers.Dense(2 * self.problem_size, activation=self.custom_activation)
         ])
+        # self.mlp = tf.keras.Sequential([
+        #     # --- CAMBIO DE ARQUITECTURA ---
+        #     # Cambiamos Flatten por GlobalAveragePooling2D
+        #     tf.keras.layers.GlobalAveragePooling2D(), 
+            
+        #     # Nota: Al hacer esto, la cantidad de conexiones baja drásticamente.
+        #     # Puedes dejar estas capas densas, o reducir el número de neuronas 
+        #     # si notas que el modelo es demasiado pesado.
+        #     tf.keras.layers.Dense(4000, activation='tanh'),
+        #     tf.keras.layers.Dense(2000, activation='tanh'),
+        #     tf.keras.layers.Dense(1000, activation='tanh'),
+        #     tf.keras.layers.Dense(500, activation='tanh'),
+        #     tf.keras.layers.Dense(300, activation='tanh'),
+        #     tf.keras.layers.Dense(2 * self.problem_size, activation=self.custom_activation)
+        # ])
+
+        # 2. Instanciar la capa dinámica
+        self.dynamic_rotation = DynamicPhaseRotationLayer()
 
     def call(self, input_tensor):
         # Pass the input through the attention network
@@ -106,6 +146,12 @@ class NLBModel(keras.Model):
         # x = self.fft(attended_input)
         x = self.fft(x)
         y = self.mlp(x)
+        # # Flujo secundario: predecir el desfase para ESTA imagen
+        # # Genera un tensor de (batch_size, 1)
+        # shift = self.rotation_predictor(x) 
+        
+        # Aplicar la corrección dinámica
+        # y_corregida = self.dynamic_rotation(y, shift)
 
         return y
 

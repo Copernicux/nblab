@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd 
 import utils as ut 
 import time 
+from PIL import Image
+import io
 from sklearn.metrics.pairwise import cosine_similarity
 from scipy.stats import wasserstein_distance
 import tensorflow as tf
@@ -48,17 +50,26 @@ class NBLab:
         N = self.problem_size
         return np.random.random((N,2))
 
-    def train_model(self, data):
+    def train_model(self, data, callbacks=None):
         X, y = data["X"], data["y"]
-        # opt = tf.keras.optimizers.SGD(self.args["learning_rate"])
-        opt = tf.keras.optimizers.Adagrad(self.args["learning_rate"])
-        # opt = tf.keras.optimizers.Nadam(self.args["learning_rate"])
-        # opt = tf.keras.optimizers.RMSprop(self.args["learning_rate"])
+        
+        # --- CAMBIO DE OPTIMIZADOR ---
+        opt = tf.keras.optimizers.Adam(learning_rate=self.args["learning_rate"])
+        
         model = NLBModel(self.args)
         training = CustomFit(model)
-        # training.compile(optimizer=opt, loss=self.CustomKLDLoss)
         training.compile(optimizer=opt, loss=self.CustomGaussianLoss)
-        history = training.fit(X,y, epochs = self.epochs, batch_size = self.batch_size, verbose=True)
+        
+        if callbacks is None:
+            callbacks = []
+            
+        history = training.fit(
+            X, y, 
+            epochs=self.epochs, 
+            batch_size=self.batch_size, 
+            verbose=False,
+            callbacks=callbacks
+        )
         self.model = training
         return training, history
     
@@ -198,18 +209,44 @@ class NBLab:
     
     
     def CustomGaussianLoss(self, y, y_pred):
-
         len_y_pred = y_pred.shape[1]
         alpha, beta = y_pred[:,:len_y_pred//2], y_pred[:,len_y_pred//2:]
+        
+        # 1. CORRECCIÓN FÍSICA: Forzar que la amplitud sea estrictamente positiva
+        alpha = tf.math.abs(alpha)
+
         real_pred, imag_pred = self.get_pred_beam(alpha, beta)
         int_true = y[:,:,:,0] 
 
-
         int_pred = tf.math.abs((tf.math.square(real_pred) + tf.math.square(imag_pred)))
 
-        loss = K.sum(K.sum(self.gaussian_mask() * tf.math.abs(int_true - int_pred)))
-
-        return loss
+        # Pérdida principal de Intensidad (Ronda los ~4000 a ~5000)
+        loss_intensity = K.sum(K.sum(self.gaussian_mask() * tf.math.abs(int_true - int_pred)))
+        
+        # 2. RE-ESCALAMIENTO DE CASTIGOS:
+        # Si la intensidad es 4000, los castigos deben ser lo suficientemente grandes 
+        # para que al gradiente le "duela" ignorarlos.
+        
+        penalty_factor = 100.0 # Mantiene la fase alrededor de ~180
+        phase_collapse_penalty = K.sum(tf.math.exp(-tf.math.abs(beta)))
+        phase_loss = penalty_factor * phase_collapse_penalty
+        
+        # Subimos el factor drásticamente de 0.1 a 5000.0 
+        # L1_Alpha pasará de ~0.06 a ~300. Ahora la red SÍ apagará modos.
+        sparsity_factor = 50000.0
+        loss_sparsity = sparsity_factor * K.sum(tf.math.abs(alpha))
+        
+        # Subimos el factor de 0.005 a 200.0
+        # TV pasará de ~1.5 a ~300. Obligará a que la imagen sea suave.
+        tv_factor = 20000.0
+        int_pred_expanded = tf.expand_dims(int_pred, axis=-1)
+        loss_tv = tv_factor * K.sum(tf.image.total_variation(int_pred_expanded))
+    
+        # IMPRESIÓN DE DIAGNÓSTICO (Déjalo para vigilar la nueva pelea)
+        # tf.print("\n[DEBUG] Int:", loss_intensity, " | Fase:", phase_loss, " | L1_Alpha:", loss_sparsity, " | TV:", loss_tv)
+    
+        # Sumamos todas las penalizaciones
+        return loss_intensity + phase_loss 
     
     def CustomKLDLoss(self, y, y_pred):
         len_y_pred = y_pred.shape[1]
@@ -243,13 +280,6 @@ class NBLab:
         zz = tf.constant(zz, dtype=np.float32)
         return zz
     
-    # def parabolic_mask(self):
-    #     xx, yy = self.create_cartesian_meshgrid()
-    #     r, theta = self.cart2pol(xx, yy)
-    #     sigma = self.args["loss_sigma"]
-    #     zz = 2 * (r/sigma) / (1-np.cos(theta))
-    #     zz = tf.constant(zz, dtype=np.float32)
-    #     return zz
     
     def create_cartesian_meshgrid(self):
         window_size = self.args["window_size"]
@@ -264,3 +294,83 @@ class NBLab:
         rho = np.sqrt(x**2 + y**2)
         phi = np.arctan2(y, x)
         return (rho, phi)
+    
+class BeamCompareAnimationCallback(tf.keras.callbacks.Callback):
+    # Añadimos parámetros para el nombre del GIF y la frecuencia de actualización
+    def __init__(self, nblab_instance, sample_x, sample_y, save_path="evolucion.gif", freq=2):
+        super().__init__()
+        self.nblab = nblab_instance
+        self.sample_x = sample_x
+        self.sample_y = sample_y  
+        self.save_path = save_path
+        self.freq = freq  # Solo dibuja cada 'freq' épocas
+        self.frames = []  # Aquí guardaremos las imágenes para el GIF
+        self.im1 = None
+        self.im2 = None
+        
+        plt.ion()
+        self.fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(10, 5))
+        plt.pause(0.1)
+
+    def on_epoch_end(self, epoch, logs=None):
+        # 1. ACELERACIÓN: Solo renderizar la época 0 y luego cada 'freq' épocas
+        if epoch != 0 and (epoch + 1) % self.freq != 0:
+            return
+
+        # Predecir
+        y_pred = self.model.predict(np.array([self.sample_x]), verbose=0)
+        
+        len_y_pred = y_pred.shape[1]
+        alpha = y_pred[0, :len_y_pred//2]
+        beta = y_pred[0, len_y_pred//2:]
+        
+        abs_pred_beam, _ = self.nblab.compose_beam(alpha, beta)
+        intensity_pred = np.sqrt(np.abs(abs_pred_beam[:, :, 0])).astype(float)
+
+        if self.im1 is None:
+            intensity_true = np.sqrt(np.abs(self.sample_y[:, :, 0])).astype(float)
+            
+            self.im1 = self.ax1.imshow(intensity_pred, cmap='hot', aspect='auto')
+            self.ax1.set_title("Predicción", fontweight='bold')
+            self.fig.colorbar(self.im1, ax=self.ax1)
+            
+            self.im2 = self.ax2.imshow(intensity_true, cmap='hot', aspect='auto')
+            self.ax2.set_title("Objetivo Real", fontweight='bold')
+            self.fig.colorbar(self.im2, ax=self.ax2)
+        else:
+            self.im1.set_data(intensity_pred)
+            
+            vmin = np.min(intensity_pred)
+            vmax = np.max(intensity_pred)
+            if vmin == vmax: 
+                vmax = vmin + 1e-5
+            self.im1.set_clim(vmin=vmin, vmax=vmax)
+        
+        loss_val = logs.get('loss', 0)
+        self.fig.suptitle(f"Época: {epoch + 1} | Loss: {loss_val:.4f}", fontsize=14, fontweight='bold')
+        
+        # 2. Reducimos el tiempo de pausa al mínimo para que fluya rápido
+        plt.pause(0.001) 
+        
+        # 3. CAPTURA DE FRAME: Convertimos la figura de Matplotlib a una imagen de PIL
+        buf = io.BytesIO()
+        self.fig.savefig(buf, format='png', bbox_inches='tight')
+        buf.seek(0)
+        img = Image.open(buf).copy()
+        self.frames.append(img)
+        buf.close()
+
+    def on_train_end(self, logs=None):
+        plt.ioff()
+        # 4. GUARDAR EL GIF AL TERMINAR
+        if len(self.frames) > 0:
+            print(f"\nGuardando animación en {self.save_path}...")
+            
+            self.frames[0].save(
+                self.save_path,
+                save_all=True,
+                append_images=self.frames[1:],
+                duration=20,  # <--- ¡AQUÍ ESTÁ LA CLAVE! Bájsalo a 20 o 30
+                loop=0
+            )
+            print("¡GIF guardado con éxito!\n")
