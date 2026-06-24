@@ -1,0 +1,38 @@
+{
+    "metadata": {
+        "source_file": "beams/beam_v4_256.mat",
+        "timestamp": "20260623_131200",
+        "N_modes": 4,
+        "loss_sigma": 100.0,
+        "learning_rate": 0.001,
+        "gamma_fourier": 50.0,
+        "lambda_sparse": 1e-07,
+        "lambda_tv": 1e-06,
+        "k_t_inferred": 1.9921212196350098,
+        "final_apodized_loss": 69.29684448242188,
+        "resolution": 256,
+        "window_size": 20.0
+    },
+    "coefficients": [
+        {
+            "n": 1,
+            "alpha": 0.7055302262306213,
+            "beta_rad": 0.9401374459266663
+        },
+        {
+            "n": 2,
+            "alpha": 0.39996010065078735,
+            "beta_rad": 1.1106151342391968
+        },
+        {
+            "n": 3,
+            "alpha": 0.08551279455423355,
+            "beta_rad": 1.274904489517212
+        },
+        {
+            "n": 4,
+            "alpha": 0.3338232636451721,
+            "beta_rad": 0.8948822021484375
+        }
+    ]
+}
